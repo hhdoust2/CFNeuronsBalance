@@ -7,4 +7,6 @@ compatibility_date = "2024-01-01"
 # مقدار id را اینجا بگذارید.
 [[kv_namespaces]]
 binding = "ACCOUNTS"
-id = "REPLACE_WITH_NAMESPACE_ID"
+id = "890b1c0a198e415c86f8e47d79fe9bf9"
+
+
