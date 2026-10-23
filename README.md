@@ -50,7 +50,6 @@ wrangler secret put ENCRYPTION_KEY     # کلید رمزنگاری (یک رشت�
 اختیاری:
 ```bash
 wrangler secret put WEBHOOK_SECRET     # امنیت وبهوک (پیشنهادی)
-wrangler secret put NEURONS_API_URL     # فقط اگر آدرس API پیش‌فرض را تغییر دهید
 ```
 
 > توجه: اگر `ENCRYPTION_KEY` را بعداً عوض کنید، حساب‌های ذخیره‌شده قابل رمزگشایی نخواهند بود (باید دوباره ثبت شوند).
@@ -76,18 +75,27 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://cf-neurons-
   ```
   - نام: فقط حروف انگلیسی، عدد، `_` یا `-`
   - `account_id`: شناسه‌ی حساب کلادفلر
-  - `api_token`: توکن API کلادفلر (با دسترسی به Workers AI)
+  - `api_token`: توکن API کلادفلر (راهنمای ساخت توکن مناسب در بخش «نکته درباره نحوه دریافت موجودی نورون»)
 - **لیست حساب‌ها**: `/accounts`
 - **حذف حساب**: `/delaccount test`
 - **موجودی**: دکمه «💰 موجودی» یا دستور `/balance`
 
-## نکته درباره آدرس API نورون
-آدرس پیش‌فرض:
-```
-https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/workers-ai/usage
-```
-اگر کلادفلر این آدرس یا ساختار پاسخ را تغییر دهد:
-- آدرس را از طریق Secret با نام `NEURONS_API_URL` (با جای‌نگهدار `{account_id}`) بازنویسی کنید.
-- یا در `index.js` مقدار `DEFAULT_NEURONS_API_URL` را عوض کنید.
+## نکته درباره نحوه دریافت موجودی نورون
 
-ربات به‌صورت هوشمند میدان‌های دارای کلیدهای `neuron` / `remaining` / `balance` / `quota` / `credits` را در پاسخ API پیدا می‌کند.
+ربات موجودی نورون را از **GraphQL Analytics** کلادفلر (`https://api.cloudflare.com/client/v4/graphql`) و با کوئری `aiInferenceAdaptiveGroups` دریافت می‌کند:
+- فیلد جمع‌شده: `sum.totalNeurons`
+- بازه: امروز (به وقت UTC) — هر روز ساعت ۰۰:۰۰ UTC ریست می‌شود
+- نمایش: مصرف‌شده، سقف رایگان روزانه (۱۰٬۰۰۰)، باقیمانده و زمان ریست
+
+### ساخت توکن API مناسب
+
+تک در `/addaccount` باید یک **API Token سفارشی** با دسترسی به همان حساب باشد:
+
+1. داشبورد کلادفلر ← **My Profile** ← **API Tokens** ← **Create Token** ← **Create Custom Token**.
+2. مجوزها (Permissions):
+   - **Permission:** `Account` → **Workers AI** → **Edit** (حداقل Read)
+   - اگر خطای permission دریافت کردید، **Account Analytics / GraphQL Analytics** را نیز اضافه کنید (مجوز Read).
+3. **Account Resources:** `Include` → همان حساب کلادفلر را انتخاب کنید (برای امنیت، به‌جای All accounts).
+4. توکن ساخته‌شده را در `/addaccount` ثبت کنید.
+
+> نکته: توکن باید دسترسی سطح **Account** (نه Zone) داشته باشد؛ اگر حساب شما چندگانه است، برای هر حساب توکن جداگانه‌ای با دسترسی به همان حساب بسازید.
