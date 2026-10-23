@@ -1,0 +1,10 @@
+name = "cf-neurons-bot"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+# فضای نام KV برای ذخیره‌ی امن حساب‌های کلادفلر (رمزنگاری‌شده)
+# بعد از اجرای: wrangler kv namespace create ACCOUNTS
+# مقدار id را اینجا بگذارید.
+[[kv_namespaces]]
+binding = "ACCOUNTS"
+id = "REPLACE_WITH_NAMESPACE_ID"
