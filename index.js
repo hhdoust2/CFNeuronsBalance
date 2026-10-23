@@ -3,11 +3,9 @@ import { Bot, InlineKeyboard } from "grammy";
 // ==========================================
 // تنظیمات پیش‌فرض
 // ==========================================
-// آدرس API پیش‌فرض برای دریافت موجودی «نورون»های Workers AI
-// اگر کلادفلر آدرس را عوض کند، آن را با Secret با نام NEURONS_API_URL بازنویسی کنید.
-// در الگو، توکن {account_id} با شناسه‌ی حساب جایگزین می‌شود.
-const DEFAULT_NEURONS_API_URL =
-  "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/workers-ai/usage";
+// موجودی «نورون»ها از GraphQL Analytics کلادفلر گرفته می‌شود
+// (دیتاست aiInferenceAdaptiveGroups، فیلد جمع‌شده sum.totalNeurons)
+const GRAPHQL_API_URL = "https://api.cloudflare.com/client/v4/graphql";
 const FETCH_TIMEOUT = 30000;
 const MAX_NAME_LEN = 32;
 const ACCOUNT_NAME_RE = /^[A-Za-z0-9_\-]+$/;
@@ -134,64 +132,97 @@ function validateAccountName(name) {
 }
 
 // ==========================================
-// ۴. دریافت موجودی نورون کار کلادفلر
+// ۴. دریافت مصرف نورون روزانه از گراف‌کیوال کلادفلر
 // ==========================================
-function guessNumber(v) {
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  if (typeof v === "string") {
-    const n = Number(v.replace(/[^\d.\-]/g, ""));
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
+
+// 🕒 گرفتن تاریخ امروز به وقت UTC (فرمت YYYY-MM-DD)
+function getUTCDate() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
 
-function collectNumbers(obj, out) {
-  if (Array.isArray(obj)) {
-    obj.forEach((o) => collectNumbers(o, out));
-    return out;
-  }
-  if (obj && typeof obj === "object") {
-    for (const [k, v] of Object.entries(obj)) {
-      if (/neuron|remaining|balance|quota|credits/i.test(k)) {
-        const n = guessNumber(v);
-        if (n !== null) out.push({ key: k, value: n });
+// ⏳ ثانیه‌های باقی‌مانده تا نیمه‌شب بعدی به وقت UTC (لحظه‌ی ریست روزانه)
+function secondsUntilUTCMidnight() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    hourCycle: "h23",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  }).formatToParts(new Date());
+  const get = (type) => parseInt(parts.find((p) => p.type === type).value, 10);
+  return 86400 - (get("hour") * 3600 + get("minute") * 60 + get("second"));
+}
+
+// 🕐 تبدیل ثانیه به متن خوانای فارسی (مثلاً «۳ ساعت و ۲۰ دقیقه»)
+function formatDuration(totalSeconds) {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.max(1, Math.ceil((totalSeconds % 3600) / 60));
+  return hours > 0 ? `${hours} ساعت و ${minutes} دقیقه` : `${minutes} دقیقه`;
+}
+
+// 📊 دریافت مجموع نورون مصرف‌شده امروز (به وقت UTC) از GraphQL Analytics کلادفلر
+// دیتاست: aiInferenceAdaptiveGroups — فیلد جمع‌شده: sum.totalNeurons
+async function getNeuronUsage(accountId, token) {
+  const todayUtc = getUTCDate();
+  const query = `
+    query GetTodayNeurons($accountTag: string!, $today: Date!) {
+      viewer {
+        accounts(filter: { accountTag: $accountTag }) {
+          aiInferenceAdaptiveGroups(filter: { date: $today }, limit: 1000) {
+            sum { totalNeurons }
+          }
+        }
       }
-      collectNumbers(v, out);
     }
+  `;
+  try {
+    const res = await fetchWithTimeout(GRAPHQL_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query,
+        variables: { accountTag: accountId, today: todayUtc },
+      }),
+    }, 6000);
+    const data = await res.json();
+    if (!res.ok || data?.errors) {
+      const msg = data?.errors?.[0]?.message || JSON.stringify(data).slice(0, 400);
+      throw new Error(msg);
+    }
+    const groups = data?.data?.viewer?.accounts?.[0]?.aiInferenceAdaptiveGroups || [];
+    const consumed = groups.reduce((sum, g) => sum + (g?.sum?.totalNeurons || 0), 0);
+    return { ok: true, consumed, date: todayUtc };
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error("درخواست وضعیت مصرف بیش از حد طول کشید (timeout).");
+    }
+    throw err;
   }
-  return out;
 }
 
-function pickBest(found) {
-  // ترجیح کلیدهای مشخص‌تر
-  const priority = (k) =>
-    /^remaining_neurons$/i.test(k) ? 4
-    : /neuron/i.test(k) ? 3
-    : /remaining/i.test(k) ? 2
-    : /quota|credits/i.test(k) ? 1
-    : 0;
-  found.sort((a, b) => priority(b.key) - priority(a.key) || b.value - a.value);
-  return found[0];
-}
-
-async function fetchNeuronsBalance(accountId, token, env) {
-  const template = env.NEURONS_API_URL || DEFAULT_NEURONS_API_URL;
-  const url = template.replace("{account_id}", encodeURIComponent(accountId));
-  const res = await fetchWithTimeout(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) {
-    const msg = body?.errors?.[0]?.message || `HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-  const found = collectNumbers(body?.result ?? body, []);
-  if (!found.length) throw new Error("پاسخ API قابل فهم نبود.");
-  const best = pickBest(found);
-  return { value: best.value, unit: best.key };
+// ساخت متن قابل‌نمایش وضعیت نورون برای یک حساب
+// نکته: سقف ۱۰هزارتایی مقداری است که خود کلادفلر برای پلن Free اعمال می‌کند؛
+// از هیچ API قابل استعلام نیست و به‌عنوان عدد ثابت شناخته‌شده نگه‌داشته شده است.
+function formatNeuronUsage(name, usage) {
+  const FREE_DAILY_LIMIT = 10000;
+  const consumed = usage.consumed;
+  const remaining = Math.max(FREE_DAILY_LIMIT - consumed, 0);
+  return [
+    `✅ <b>${escHtml(name)}</b>`,
+    `🔸 مصرف‌شده: <b>${fmtNumber(consumed)}</b>`,
+    `🔸 سقف رایگان روزانه: <b>${FREE_DAILY_LIMIT}</b>`,
+    `🔸 باقیمانده (اگر پلن Free): <b>${fmtNumber(remaining)}</b>`,
+    "🔸 ریست: هر روز ساعت ۰۰:۰۰ به وقت UTC",
+    `🔸 حدود ${formatDuration(secondsUntilUTCMidnight())} دیگر ریست می‌شود`,
+  ].join("\n");
 }
 
 // ==========================================
@@ -371,19 +402,15 @@ function registerHandlers(bot) {
     const results = [];
     for (const [name, data] of accounts.entries()) {
       try {
-        const { value, unit } = await fetchNeuronsBalance(
-          data.account_id,
-          data.api_token,
-          ctx.env
-        );
-        results.push(`✅ <b>${escHtml(name)}</b>: ${fmtNumber(value)} ${escHtml(unit)}`);
+        const usage = await getNeuronUsage(data.account_id, data.api_token);
+        results.push(formatNeuronUsage(name, usage));
       } catch (e) {
         results.push(`❌ <b>${escHtml(name)}</b>: ${escHtml(e.message)}`);
       }
     }
 
     await ctx.reply(
-      `💰 <b>موجودی نورون‌ها</b>\n\n${results.join("\n")}`,
+      `💰 <b>وضعیت مصرف نورون (امروز، به وقت UTC)</b>\n\n${results.join("\n\n")}`,
       { parse_mode: "HTML", reply_markup: mainMenuKeyboard() }
     );
   }
